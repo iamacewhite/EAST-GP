@@ -28,7 +28,7 @@ def char_to_int(char):
 
     return temp
 
-def encode_str(string):
+def encode_str(label):
     encode_label = [char_to_int(char) for char in label]
     length = len(label)
     return encode_label,length

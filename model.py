@@ -5,6 +5,7 @@ from tensorflow.contrib import slim
 
 tf.app.flags.DEFINE_integer('text_scale', 512, '')
 tf.app.flags.DEFINE_integer('num_classes', 96, '')
+tf.app.flags.DEFINE_integer('hidden_size', 128, '')
 tf.app.flags.DEFINE_string('base_model', 'resnet_v1_101', '')
 tf.app.flags.DEFINE_string('loss', 'dice', '')
 
@@ -43,7 +44,7 @@ def mean_image_subtraction(images, means=[123.68, 116.78, 103.94]):
     return tf.concat(axis=3, values=channels)
 
 
-def model(images, valid_bboxes, valid_affines, seq_len, weight_decay=1e-5, is_training=True, model=FLAGS.base_model):
+def model(images, valid_affines, seq_len, mask, weight_decay=1e-5, is_training=True, model=FLAGS.base_model):
     '''
     define the model, we use slim's implemention of resnet
     '''
@@ -105,8 +106,9 @@ def model(images, valid_bboxes, valid_affines, seq_len, weight_decay=1e-5, is_tr
                     g[i] = slim.conv2d(h[i], num_outputs[i], 3)
                 print('Shape of h_{} {}, g_{} {}'.format(i, h[i].shape, i, g[i].shape))
 
-            text_proposals = roi_rotate(g[3], valid_bboxes, valid_affines)
-            logits, targets, seq_len, W, b = lstm_ctc(text_proposals, seq_len)
+            text_proposals = roi_rotate(g[3], valid_affines, mask)
+            print('Shape after ROI rotate: {}'.format(text_proposals.shape))
+            logits = lstm_ctc(text_proposals, seq_len)
 
             # here we use a slightly different way for regression part,
             # we first use a sigmoid to limit the regression range, and also
@@ -117,7 +119,7 @@ def model(images, valid_bboxes, valid_affines, seq_len, weight_decay=1e-5, is_tr
             angle_map = (slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) - 0.5) * np.pi/2 # angle is between [-45, 45]
             F_geometry = tf.concat([geo_map, angle_map], axis=-1)
 
-    return F_score, F_geometry, logits, targets, seq_len, W, b
+    return F_score, F_geometry, logits, text_proposals
 
 
 def focal_loss(prediction_tensor, target_tensor, weights=None, alpha=0.25, gamma=2):
@@ -153,11 +155,14 @@ def dice_coefficient(y_true_cls, y_pred_cls,
     dice_sum = tf.summary.scalar('classification_dice_loss', loss)
     return loss, dice_sum
 
-def roi_rotate(shared_feature, bbox, affine):
+def roi_rotate(shared_feature, affine, mask):
     affine = tf.reshape(affine, [-1, 9])[:, :8]
     transformed = tf.contrib.image.transform(shared_feature, affine, interpolation='BILINEAR')
-    return transformed[:, 8, width, :]
+    masked_feature = (transformed * mask)[:, :8, :, :]
+    return masked_feature
 
+def lstm_cell():
+    return tf.contrib.rnn.LSTMCell(FLAGS.hidden_size, state_is_tuple=True)
 
 def lstm_ctc(features, seq_len):
     # Has size [batch_size, max_stepsize, num_features], but the
@@ -175,10 +180,13 @@ def lstm_ctc(features, seq_len):
     # Can be:
     #   tf.nn.rnn_cell.RNNCell
     #   tf.nn.rnn_cell.GRUCell
-    lstm_cell = tf.contrib.rnn.LSTMCell(128, state_is_tuple=True)
+    print('Shape in ctc: {}'.format(features.shape))
+    features = tf.transpose(features, perm=[0, 2, 1, 3])
+    features = tf.reshape(features, [-1, features.shape[1], features.shape[2]* features.shape[3]])
+    print('Shape in ctc: {}'.format(features.shape))
 
     # Stacking rnn cells
-    stack = tf.contrib.rnn.MultiRNNCell([lstm_cell for _ in range(0, 2)],
+    stack = tf.contrib.rnn.MultiRNNCell([lstm_cell() for _ in range(0, 2)],
                                         state_is_tuple=True)
 
     # The second output is the last state and we will no use that
@@ -188,12 +196,12 @@ def lstm_ctc(features, seq_len):
     batch_s, max_timesteps = shape[0], shape[1]
 
     # Reshaping to apply the same weights over the timesteps
-    outputs = tf.reshape(outputs, [-1, 128])
+    outputs = tf.reshape(outputs, [-1, FLAGS.hidden_size])
 
     # Truncated normal with mean 0 and stdev=0.1
     # Tip: Try another initialization
     # see https://www.tensorflow.org/versions/r0.9/api_docs/python/contrib.layers.html#initializers
-    W = tf.Variable(tf.truncated_normal([128,
+    W = tf.Variable(tf.truncated_normal([FLAGS.hidden_size,
                                          FLAGS.num_classes],
                                         stddev=0.1), name="W")
     # Zero initialization
@@ -209,12 +217,13 @@ def lstm_ctc(features, seq_len):
     # Time major
     logits = tf.transpose(logits, (1, 0, 2))
 
-    return logits, targets, seq_len, W, b
+    return logits
 
 def ctc_loss(targets, logits, seq_len):
-    loss = tf.nn.ctc_loss(targets, logits, seq_len, time_major=False, ignore_longer_outputs_than_inputs=True)
+    loss = tf.nn.ctc_loss(targets, logits, seq_len, time_major=True, ignore_longer_outputs_than_inputs=True)
     cost = tf.reduce_mean(loss)
-    return cost
+    ctc_sum = tf.summary.scalar('ctc_loss', cost)
+    return cost, ctc_sum
 
 def loss(y_true_cls, y_pred_cls,
          y_true_geo, y_pred_geo,
@@ -240,7 +249,7 @@ def loss(y_true_cls, y_pred_cls,
     # scale classification loss to match the iou loss part
         classification_loss, dice_sum = focal_loss(tf.reshape(y_pred_cls*(1-training_mask), [-1, FLAGS.text_scale*FLAGS.text_scale, 1]), tf.reshape(y_true_cls*(1-training_mask), [-1, FLAGS.text_scale*FLAGS.text_scale, 1]))
         #classification_loss *= 0.02
-    ctc_loss = ctc_loss(targets, logits, seq_len)
+    recon_loss, ctc_sum = ctc_loss(targets, logits, seq_len)
 
     # d1 -> top, d2->right, d3->bottom, d4->left
     d1_gt, d2_gt, d3_gt, d4_gt, theta_gt = tf.split(value=y_true_geo, num_or_size_splits=5, axis=3)
@@ -257,4 +266,4 @@ def loss(y_true_cls, y_pred_cls,
     theta_sum = tf.summary.scalar('geometry_theta', tf.reduce_mean(L_theta * y_true_cls * training_mask))
     L_g = L_AABB + 20 * L_theta
 
-    return tf.reduce_mean(L_g * y_true_cls * training_mask) + classification_loss + ctc_loss, aabb_sum, theta_sum, dice_sum
+    return tf.reduce_mean(L_g * y_true_cls * training_mask) + classification_loss + recon_loss, [aabb_sum, theta_sum, dice_sum, ctc_sum]

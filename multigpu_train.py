@@ -24,28 +24,29 @@ FLAGS = tf.app.flags.FLAGS
 gpus = list(range(len(FLAGS.gpu_list.split(','))))
 print "checkpoint path {}".format(FLAGS.checkpoint_path)
 
-def tower_loss(images, score_maps, geo_maps, training_masks, valid_bboxes, valid_affines, seq_len, reuse_variables=None, is_training=True):
+def tower_loss(images, score_maps, geo_maps, training_masks, valid_affines, seq_len, mask, targets, reuse_variables=None, is_training=True):
     # Build inference graph
     with tf.variable_scope(tf.get_variable_scope(), reuse=reuse_variables):
-        f_score, f_geometry, targets, seq_len, _, _ = model.model(images, valid_bboxes, valid_affines, seq_len, is_training=is_training)
+        f_score, f_geometry, logits, text_proposals = model.model(images, valid_affines, seq_len, mask, is_training=is_training)
 
-    model_loss, ab_sum, theta_sum, cls_sum = model.loss(score_maps, f_score, geo_maps, f_geometry, training_masks, targets, seq_len)
+    model_loss, loss_sum_list = model.loss(score_maps, f_score, geo_maps, f_geometry, training_masks, targets, logits, seq_len)
     total_loss = tf.add_n([model_loss] + tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
 
     # add summary
     if reuse_variables is None:
-        #tf.summary.image('input', images)
-        #tf.summary.image('score_map', score_maps)
-        #tf.summary.image('score_map_pred', f_score * 255)
-        #tf.summary.image('geo_map_0', geo_maps[:, :, :, 0:1])
-        #tf.summary.image('geo_map_0_pred', f_geometry[:, :, :, 0:1])
-        #tf.summary.image('training_masks', training_masks)
+        input_sum = tf.summary.image('input', images)
+        score_map_sum = tf.summary.image('score_map', score_maps)
+        score_map_pred_sum = tf.summary.image('score_map_pred', f_score * 255)
+        geo_map_sum = tf.summary.image('geo_map_0', geo_maps[:, :, :, 0:1])
+        geo_map_pred_sum = tf.summary.image('geo_map_0_pred', f_geometry[:, :, :, 0:1])
+        detection_mask_sum = tf.summary.image('training_masks', training_masks)
+        recongnition_mask_sum = tf.summary.image('feature_mask', mask)
         model_loss_sum = tf.summary.scalar('model_loss', model_loss)
         total_loss_sum = tf.summary.scalar('total_loss', total_loss)
         model_val_sum = tf.summary.scalar('model_val_loss', model_loss)
         total_val_sum = tf.summary.scalar('total_val_loss', total_loss)
 
-    return total_loss, model_loss, model_loss_sum, total_loss_sum, model_val_sum, total_val_sum, ab_sum, theta_sum, cls_sum
+    return total_loss, model_loss, [model_loss_sum, total_loss_sum, input_sum, score_map_sum, score_map_pred_sum, geo_map_sum, geo_map_pred_sum, detection_mask_sum, recongnition_mask_sum] + loss_sum_list, [model_val_sum, total_val_sum]
 
 
 def average_gradients(tower_grads):
@@ -76,20 +77,20 @@ def main(argv=None):
             tf.gfile.DeleteRecursively(FLAGS.checkpoint_path)
             tf.gfile.MkDir(FLAGS.checkpoint_path)
 
-    input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
+    input_images = tf.placeholder(tf.float32, shape=[None, FLAGS.input_size, FLAGS.input_size, 3], name='input_images')
     input_score_maps = tf.placeholder(tf.float32, shape=[None, None, None, 1], name='input_score_maps')
     if FLAGS.geometry == 'RBOX':
         input_geo_maps = tf.placeholder(tf.float32, shape=[None, None, None, 5], name='input_geo_maps')
     else:
         input_geo_maps = tf.placeholder(tf.float32, shape=[None, None, None, 8], name='input_geo_maps')
     input_training_masks = tf.placeholder(tf.float32, shape=[None, None, None, 1], name='input_training_masks')
-    valid_bboxes = tf.placeholder(tf.float32, shape=[None, 4, 2])
+    # valid_bboxes = tf.placeholder(tf.float32, shape=[None, 4, 2])
     valid_labels = tf.sparse_placeholder(tf.int32)
 
     # 1d array of size [batch_size]
     seq_len = tf.placeholder(tf.int32, [None])
     valid_affines = tf.placeholder(tf.float32, shape=[None, 3, 3])
-    text_masks = tf.placeholder(tf.float32, shape=[None, 8, None, 1], name='text_masks')
+    text_masks = tf.placeholder(tf.float32, shape=[None, None, None, 1], name='text_masks')
 
     # model_val_loss = tf.placeholder(tf.float32, shape=[], name='model_val_loss')
     # total_val_loss = tf.placeholder(tf.float32, shape=[], name='total_val_loss')
@@ -122,9 +123,9 @@ def main(argv=None):
                 isms = input_score_maps_split[i]
                 igms = input_geo_maps_split[i]
                 itms = input_training_masks_split[i]
-                total_loss, model_loss, model_loss_sum, total_loss_sum, model_val_sum, total_val_sum, ab_sum, theta_sum, cls_sum = tower_loss(iis, isms, igms, itms, valid_bboxes, valid_affines, seq_len, text_masks, reuse_variables, is_training)
-                train_sums.extend([model_loss_sum, total_loss_sum, ab_sum, theta_sum, cls_sum])
-                test_sums.extend([model_val_sum, total_val_sum])
+                total_loss, model_loss, train_sum, test_sum = tower_loss(iis, isms, igms, itms, valid_affines, seq_len, text_masks, valid_labels, reuse_variables, is_training)
+                train_sums.extend(train_sum)
+                test_sums.extend(test_sum)
                 batch_norm_updates_op = tf.group(*tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope))
                 reuse_variables = True
 
@@ -179,10 +180,10 @@ def main(argv=None):
                                                                                 input_score_maps: data[2],
                                                                                 input_geo_maps: data[3],
                                                                                 input_training_masks: data[4],
-                                                                                valid_bboxes: data[5],
-                                                                                valid_labels: data[6],
-                                                                                seq_len: data[7],
-                                                                                valid_affines: data[8],
+                                                                                valid_labels: data[5],
+                                                                                seq_len: data[6],
+                                                                                valid_affines: data[7],
+                                                                                text_masks: data[8],
                                                                                 is_training: True})
 
             summary_writer.add_summary(summary_str, global_step=step)
@@ -203,10 +204,10 @@ def main(argv=None):
                                                                                     input_score_maps: val_data[2],
                                                                                     input_geo_maps: val_data[3],
                                                                                     input_training_masks: val_data[4],
-                                                                                    valid_bboxes: data[5],
-                                                                                    valid_labels: data[6],
-                                                                                    seq_len: data[7],
-                                                                                    valid_affines: data[8],
+                                                                                    valid_labels: val_data[5],
+                                                                                    seq_len: val_data[6],
+                                                                                    valid_affines: val_data[7],
+                                                                                    text_masks: val_data[8],
                                                                                     is_training: False})
                 print('Step {:06d}, val model loss {:.4f}, val total loss {:.4f}'.format(
                     step, ml_val, tl_val))

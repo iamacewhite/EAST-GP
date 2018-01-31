@@ -66,6 +66,7 @@ def load_annoataion(p):
     text_polys = []
     text_tags = []
     text_labels = []
+    text_lengths = []
     if not os.path.exists(p):
         return np.array(text_polys, dtype=np.float32)
     with open(p, 'r') as f:
@@ -84,11 +85,12 @@ def load_annoataion(p):
             encoded, length = encode_str(line[8])
             text_labels.append(encoded)
             text_polys.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
+            text_lengths.append(length)
             if label == '*' or label == '###':
                 text_tags.append(True)
             else:
                 text_tags.append(False)
-        return np.array(text_polys, dtype=np.float32), np.array(text_tags, dtype=np.bool), np.array(text_labels, dtype=np.int32s), length
+        return np.array(text_polys, dtype=np.float32), np.array(text_tags, dtype=np.bool), np.array(text_labels, dtype=np.int32), text_lengths
 
 
 def polygon_area(poly):
@@ -380,14 +382,14 @@ def rectangle_from_parallelogram(poly):
 
 def compute_affine(poly, angle):
     ht = 8
-    t = np.min(poly[:, 1])
-    b = FLAGS.input_size - np.max(poly[:, 1])
-    l = np.min(poly[:, 0])
-    r = FLAGS.input_size - np.max(poly[:, 0])
+    t = 0
+    b = point_dist_to_line(poly[2], poly[3], poly[0])
+    l = 0
+    r = point_dist_to_line(poly[1], poly[2], poly[0])
     affine_matrix = np.zeros((3,3))
     s = ht/(t+b)
-    tx = l * np.cos(angle) - t * np.sin(angle) - x
-    ty = t * np.cos(angle) + l * np.sin(angle) - y
+    tx = -1 * poly[0, 0]
+    ty = -1 * poly[0, 1]
     wt = s * (l + r)
     affine_matrix[0][0] = s * np.cos(angle)
     affine_matrix[0][1] = -1 * s * np.sin(angle)
@@ -640,7 +642,7 @@ def generate_rbox(im_size, polys, tags):
             geo_map[y, x, 3] = point_dist_to_line(p3_rect, p0_rect, point)
             # angle
             geo_map[y, x, 4] = rotate_angle
-    return score_map, geo_map, training_mask, affs, valid_masks
+    return score_map, geo_map, training_mask, np.array(affs), valid_masks
 
 
 def generator(input_size=512, batch_size=32,
@@ -661,7 +663,7 @@ def generator(input_size=512, batch_size=32,
         score_maps = []
         geo_maps = []
         training_masks = []
-        valid_bboxes = []
+        # valid_bboxes = []
         valid_labels = []
         valid_lengths = []
         # valid_thetas = []
@@ -712,7 +714,7 @@ def generator(input_size=512, batch_size=32,
                 #     valid_theta = 0
                 # else:
                 im, text_polys, text_tags, text_labels, text_lengths = crop_area(im, text_polys, text_tags, text_labels, text_lengths, crop_background=False)
-                if text_polys.shape[0] == 0:
+                if text_polys.shape[0] == 0 or not np.any(np.invert(text_tags)):
                     continue
                 h, w, _ = im.shape
 
@@ -733,13 +735,13 @@ def generator(input_size=512, batch_size=32,
                 text_polys[:, :, 1] *= resize_ratio_3_y
                 new_h, new_w, _ = im.shape
                 score_map, geo_map, training_mask, affs, valid_masks = generate_rbox((new_h, new_w), text_polys, text_tags)
-                valid_bbox = text_polys[np.invert(text_tags)]
+                # valid_bbox = text_polys[np.invert(text_tags)]
                 valid_label = text_labels[np.invert(text_tags)]
                 valid_length = text_lengths[np.invert(text_tags)]
                 valid_affine = affs[np.invert(text_tags)]
                 valid_masks = valid_masks[np.invert(text_tags)]
-                i = random.choice(range(len(valid_bbox)))
-                valid_bbox = valid_bbox[i]
+                i = random.choice(range(len(valid_label)))
+                # valid_bbox = valid_bbox[i]
                 valid_label = valid_label[i]
                 valid_length = valid_length[i]
                 valid_affine = valid_affine[i]
@@ -753,22 +755,22 @@ def generator(input_size=512, batch_size=32,
                 score_maps.append(score_map[::4, ::4, np.newaxis].astype(np.float32))
                 geo_maps.append(geo_map[::4, ::4, :].astype(np.float32))
                 training_masks.append(training_mask[::4, ::4, np.newaxis].astype(np.float32))
-                valid_bboxes.append(valid_bbox)
+                # valid_bboxes.append(valid_bbox)
                 valid_labels.append(valid_label)
                 valid_lengths.append(valid_length)
                 valid_affines.append(valid_affine)
-                text_masks.append(valid_masks)
+                text_masks.append(valid_masks[::4, ::4, np.newaxis].astype(np.float32))
                 # valid_thetas.append(valid_theta)
 
 
                 if len(images) == batch_size:
-                    yield images, image_fns, score_maps, geo_maps, training_masks, valid_bboxes, sparse_tuple_from(valid_labels), valid_lengths, valid_affines, text_masks
+                    yield images, image_fns, score_maps, geo_maps, training_masks, sparse_tuple_from(valid_labels), valid_lengths, valid_affines, text_masks
                     images = []
                     image_fns = []
                     score_maps = []
                     geo_maps = []
                     training_masks = []
-                    valid_bboxes = []
+                    # valid_bboxes = []
                     valid_labels = []
                     valid_lengths = []
                     valid_affines = []
