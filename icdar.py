@@ -383,9 +383,9 @@ def rectangle_from_parallelogram(poly):
 def compute_affine(poly, angle):
     ht = 8
     t = 0
-    b = point_dist_to_line(poly[2], poly[3], poly[0])
+    b = point_dist_to_line(poly[2], poly[3], poly[0]) / 4.
     l = 0
-    r = point_dist_to_line(poly[1], poly[2], poly[0])
+    r = point_dist_to_line(poly[1], poly[2], poly[0]) / 4.
     affine_matrix = np.zeros((3,3))
     s = ht/(t+b)
     tx = -1 * poly[0, 0]
