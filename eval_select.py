@@ -131,7 +131,7 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_
 def sort_poly(p):
     min_axis = np.argmin(np.sum(p, axis=1))
     p = p[[min_axis, (min_axis+1)%4, (min_axis+2)%4, (min_axis+3)%4]]
-    if abs(p[0, 0] - p[1, 0]) > abs(p[0, 1] - p[1, 1]):
+    if abs(p[0, 0] - p[1, 0]) - abs(p[0, 1] - p[1, 1]) >= -2:
         return p
     else:
         return p[[0, 3, 2, 1]]
@@ -145,87 +145,93 @@ def main(argv=None):
     try:
         os.makedirs(FLAGS.output_dir)
     except OSError as e:
-        if e.errno != 17:
-            raise
+        pass
 
+    if os.path.isfile(FLAGS.log):
+        with open(FLAGS.log) as f:
+            existing_log = f.read()
+    else:
+        existing_log = ""
 
-        with tf.get_default_graph().as_default():
-            input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
-            global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
+    with tf.get_default_graph().as_default():
+        input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
+        global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
 
-            f_score, f_geometry = model.model(input_images, is_training=False)
+        f_score, f_geometry = model.model(input_images, is_training=False)
 
-            variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
-            saver = tf.train.Saver(variable_averages.variables_to_restore())
-            config = tf.ConfigProto(allow_soft_placement=True)
-            config.gpu_options.allow_growth = True
-            config.gpu_options.per_process_gpu_memory_fraction = 0.8
-            with tf.Session(config=config) as sess:
-                checkpoints = os.listdir(FLAGS.checkpoint_path)
-                checkpoints = [ckpt for ckpt in checkpoints if "ckpt" in ckpt and "index" in ckpt]
-                checkpoints = [ckpt.replace('.index', '') for ckpt in checkpoints]
-                for m_path in checkpoints:
-                    ckpt_state = tf.train.get_checkpoint_state(FLAGS.checkpoint_path)
-                    model_path = os.path.join(FLAGS.checkpoint_path, m_path)
-                    print('Restore from {}'.format(model_path))
-                    saver.restore(sess, model_path)
+        variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
+        saver = tf.train.Saver(variable_averages.variables_to_restore())
+        config = tf.ConfigProto(allow_soft_placement=True)
+        config.gpu_options.allow_growth = True
+        config.gpu_options.per_process_gpu_memory_fraction = 0.8
+        with tf.Session(config=config) as sess:
+            checkpoints = os.listdir(FLAGS.checkpoint_path)
+            checkpoints = [ckpt for ckpt in checkpoints if "ckpt" in ckpt and "index" in ckpt]
+            checkpoints = [ckpt.replace('.index', '') for ckpt in checkpoints if ckpt.replace('.index', '') not in existing_log]
+            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[1]), reverse=True)
+            for m_path in checkpoints:
+                ckpt_state = tf.train.get_checkpoint_state(FLAGS.checkpoint_path)
+                model_path = os.path.join(FLAGS.checkpoint_path, m_path)
+                print('Restore from {}'.format(model_path))
+                saver.restore(sess, model_path)
 
-                    im_fn_list = get_images()
-                    for im_fn in im_fn_list:
-                        im = cv2.imread(im_fn)[:, :, ::-1]
-                        start_time = time.time()
-                        print(im_fn)
-                        im_resized, (ratio_h, ratio_w) = resize_image(im)
+                im_fn_list = get_images()
+                for im_fn in im_fn_list:
+                    im = cv2.imread(im_fn)[:, :, ::-1]
+                    start_time = time.time()
+                    print(im_fn)
+                    im_resized, (ratio_h, ratio_w) = resize_image(im)
 
-                        timer = {'net': 0, 'restore': 0, 'nms': 0}
-                        start = time.time()
-                        score, geometry = sess.run([f_score, f_geometry], feed_dict={input_images: [im_resized]})
-                        timer['net'] = time.time() - start
+                    timer = {'net': 0, 'restore': 0, 'nms': 0}
+                    start = time.time()
+                    score, geometry = sess.run([f_score, f_geometry], feed_dict={input_images: [im_resized]})
+                    timer['net'] = time.time() - start
 
-                        boxes, timer = detect(score_map=score, geo_map=geometry, timer=timer)
-                        print('{} : net {:.0f}ms, restore {:.0f}ms, nms {:.0f}ms'.format(
-                            im_fn, timer['net']*1000, timer['restore']*1000, timer['nms']*1000))
+                    boxes, timer = detect(score_map=score, geo_map=geometry, timer=timer)
+                    print('{} : net {:.0f}ms, restore {:.0f}ms, nms {:.0f}ms'.format(
+                        im_fn, timer['net']*1000, timer['restore']*1000, timer['nms']*1000))
 
-                        if boxes is not None:
-                            boxes = boxes[:, :8].reshape((-1, 4, 2))
-                            boxes[:, :, 0] /= ratio_w
-                            boxes[:, :, 1] /= ratio_h
+                    if boxes is not None:
+                        boxes = boxes[:, :8].reshape((-1, 4, 2))
+                        boxes[:, :, 0] /= ratio_w
+                        boxes[:, :, 1] /= ratio_h
 
-                        duration = time.time() - start_time
-                        print('[timing] {}'.format(duration))
+                    duration = time.time() - start_time
+                    print('[timing] {}'.format(duration))
 
-                        # save to file
-                        if boxes is not None:
-                            res_file = os.path.join(
-                                FLAGS.output_dir,
-                                '{}.txt'.format(
-                                    os.path.basename(im_fn).split('.')[0]))
+                    # save to file
+                    if boxes is not None:
+                        res_file = os.path.join(
+                            FLAGS.output_dir,
+                            'res_{}.txt'.format(
+                                os.path.basename(im_fn).split('.')[0]))
 
-                            with open(res_file, 'w') as f:
-                                for box in boxes:
-                                    # to avoid submitting errors
-                                    box = sort_poly(box.astype(np.int32))
-                                    if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
-                                        continue
-                                    f.write('{},{},{},{},{},{},{},{}\r\n'.format(
-                                        box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1]
-                                    ))
-                                    cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=1)
-                        else:
-                            res_file = os.path.join(
-                                FLAGS.output_dir,
-                                '{}.txt'.format(
-                                    os.path.basename(im_fn).split('.')[0]))
-                            os.system('touch {}'.format(res_file))
+                        with open(res_file, 'w') as f:
+                            for box in boxes:
+                                # to avoid submitting errors
+                                box = sort_poly(box.astype(np.int32))
+                                if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
+                                    continue
+                                f.write('{},{},{},{},{},{},{},{}\r\n'.format(
+                                    box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1]
+                                ))
+                                cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=1)
+                    else:
+                        res_file = os.path.join(
+                            FLAGS.output_dir,
+                            'res_{}.txt'.format(
+                                os.path.basename(im_fn).split('.')[0]))
+                        os.system('touch {}'.format(res_file))
 
-                        if not FLAGS.no_write_images:
-                            img_path = os.path.join(FLAGS.output_dir, os.path.basename(im_fn))
-                            cv2.imwrite(img_path, im[:, :, ::-1])
-                    with open(FLAGS.log, 'a+') as f:
-                        f.write('{}\n'.format(model_path))
-                    os.system('./eval_select.sh {} &>> {}'.format(FLAGS.output_dir, FLAGS.log))
-                    os.system('rm -f {}/*'.format(FLAGS.output_dir))
-                analyze(FLAGS.log)
+                    if not FLAGS.no_write_images:
+                        img_path = os.path.join(FLAGS.output_dir, os.path.basename(im_fn))
+                        cv2.imwrite(img_path, im[:, :, ::-1])
+                with open(FLAGS.log, 'a+') as f:
+                    f.write('{}\n'.format(model_path))
+                os.system('./eval_select.sh {} &>> {}'.format(FLAGS.output_dir, FLAGS.log))
+                os.system('rm -f {}/*'.format(FLAGS.output_dir))
+            analyze(FLAGS.log)
+
 if __name__ == '__main__':
     if not FLAGS.log_only:
         tf.app.run()

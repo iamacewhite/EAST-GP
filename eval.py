@@ -20,8 +20,20 @@ from icdar import restore_rectangle
 
 FLAGS = tf.app.flags.FLAGS
 
-
 def get_images():
+    files = []
+    exts = ['jpg', 'png', 'jpeg', 'JPG']
+    for parent, dirnames, filenames in os.walk(FLAGS.test_data_path, followlinks=True):
+          for filename in filenames:
+              for ext in exts:
+                  if filename.endswith(ext):
+                      files.append(os.path.join(parent, filename))
+                      break
+    print('Find {} images'.format(len(files)))
+    return files
+
+
+def get_images_old():
     '''
     find image files in test data path
     :return: list of files found
@@ -70,7 +82,7 @@ def resize_image(im, max_side_len=2400):
     return im, (ratio_h, ratio_w)
 
 
-def detect(score_map, geo_map, timer, score_map_thresh=0.5, box_thresh=0.1, nms_thres=0.2):
+def detect(score_map, geo_map, timer, score_map_thresh=0.4, box_thresh=0.1, nms_thres=0.1):
     '''
     restore text boxes from score map and geo map
     :param score_map:
@@ -111,7 +123,7 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.5, box_thresh=0.1, nms_
         mask = np.zeros_like(score_map, dtype=np.uint8)
         cv2.fillPoly(mask, box[:8].reshape((-1, 4, 2)).astype(np.int32) // 4, 1)
         boxes[i, 8] = cv2.mean(score_map, mask)[0]
-    boxes = boxes[boxes[:, 8] > box_thresh]
+    #boxes = boxes[boxes[:, 8] > box_thresh]
 
     return boxes, timer
 
@@ -119,7 +131,7 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.5, box_thresh=0.1, nms_
 def sort_poly(p):
     min_axis = np.argmin(np.sum(p, axis=1))
     p = p[[min_axis, (min_axis+1)%4, (min_axis+2)%4, (min_axis+3)%4]]
-    if abs(p[0, 0] - p[1, 0]) > abs(p[0, 1] - p[1, 1]):
+    if abs(p[0, 0] - p[1, 0]) - abs(p[0, 1] - p[1, 1]) >= -2:
         return p
     else:
         return p[[0, 3, 2, 1]]
@@ -177,6 +189,8 @@ def main(argv=None):
                     #im_fn, timer['net']*1000, timer['restore']*1000, timer['nms']*1000))
 
                 if boxes is not None:
+                    boxes_score = boxes[:, 8]
+                    boxes_score[boxes_score < 0.5] = 0.75
                     boxes = boxes[:, :8].reshape((-1, 4, 2))
                     boxes[:, :, 0] /= ratio_w
                     boxes[:, :, 1] /= ratio_h
@@ -192,19 +206,20 @@ def main(argv=None):
                             os.path.basename(im_fn).split('.')[0]))
 
                     with open(res_file, 'w') as f:
-                        for box in boxes:
+                        for i, box in enumerate(boxes):
                             # to avoid submitting errors
+
                             box = sort_poly(box.astype(np.int32))
                             if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
                                 continue
-                            f.write('{},{},{},{},{},{},{},{}\r\n'.format(
-                                box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1]
+                            f.write('{},{},{},{},{},{},{},{},{}\r\n'.format(
+                                box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1], boxes_score[i]
                             ))
                             cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=1)
                 else:
                     res_file = os.path.join(
                         FLAGS.output_dir,
-                        '{}.txt'.format(
+                        'res_{}.txt'.format(
                             os.path.basename(im_fn).split('.')[0]))
                     os.system('touch {}'.format(res_file))
                 if not FLAGS.no_write_images:

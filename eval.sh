@@ -7,4 +7,4 @@ mv *.zip ../../$7_map
 cd ..
 rm -rf $1
 cd ../$7_map
-python script.py -g=$6 -s=$1.zip
+python script_ap.py -g=$6 -s=$1.zip 
