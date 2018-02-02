@@ -87,7 +87,7 @@ def load_annoataion(p):
             encoded, length = encode_str(line[8])
             text_labels.append(encoded)
             text_polys.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
-            text_lengths.append(length)
+            text_lengths.append(FLAGS.input_size // 4)
             if label == '*' or label == '###':
                 text_tags.append(True)
             else:
