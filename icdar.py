@@ -19,6 +19,8 @@ from data_util import GeneratorEnqueuer
 import warnings
 from word_utils import *
 import random
+from itertools import compress
+import pdb
 
 warnings.simplefilter('ignore', np.RankWarning)
 
@@ -90,7 +92,7 @@ def load_annoataion(p):
                 text_tags.append(True)
             else:
                 text_tags.append(False)
-        return np.array(text_polys, dtype=np.float32), np.array(text_tags, dtype=np.bool), np.array(text_labels, dtype=np.int32), text_lengths
+        return np.array(text_polys, dtype=np.float32), np.array(text_tags, dtype=np.bool), text_labels, np.array(text_lengths)
 
 
 def polygon_area(poly):
@@ -529,7 +531,7 @@ def generate_rbox(im_size, polys, tags):
     # mask used during traning, to ignore some hard areas
     training_mask = np.ones((h, w), dtype=np.uint8)
     affs = []
-    valid_masks = np.zeros((len(polys), h, w), dtype=np.uint8)
+    valid_masks = np.zeros((len(polys), h//4, w//4), dtype=np.uint8)
     for poly_idx, poly_tag in enumerate(zip(polys, tags)):
         poly = poly_tag[0]
         tag = poly_tag[1]
@@ -736,7 +738,7 @@ def generator(input_size=512, batch_size=32,
                 new_h, new_w, _ = im.shape
                 score_map, geo_map, training_mask, affs, valid_masks = generate_rbox((new_h, new_w), text_polys, text_tags)
                 # valid_bbox = text_polys[np.invert(text_tags)]
-                valid_label = text_labels[np.invert(text_tags)]
+                valid_label = list(compress(text_labels, np.invert(text_tags)))
                 valid_length = text_lengths[np.invert(text_tags)]
                 valid_affine = affs[np.invert(text_tags)]
                 valid_masks = valid_masks[np.invert(text_tags)]
@@ -759,7 +761,7 @@ def generator(input_size=512, batch_size=32,
                 valid_labels.append(valid_label)
                 valid_lengths.append(valid_length)
                 valid_affines.append(valid_affine)
-                text_masks.append(valid_masks[::4, ::4, np.newaxis].astype(np.float32))
+                text_masks.append(valid_masks[:, :, np.newaxis].astype(np.float32))
                 # valid_thetas.append(valid_theta)
 
 

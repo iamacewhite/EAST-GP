@@ -182,7 +182,7 @@ def lstm_ctc(features, seq_len):
     #   tf.nn.rnn_cell.GRUCell
     print('Shape in ctc: {}'.format(features.shape))
     features = tf.transpose(features, perm=[0, 2, 1, 3])
-    features = tf.reshape(features, [-1, features.shape[1], features.shape[2]* features.shape[3]])
+    features = tf.reshape(features, (-1, int(features.get_shape()[1]), int(features.get_shape()[2]* features.get_shape()[3])))
     print('Shape in ctc: {}'.format(features.shape))
 
     # Stacking rnn cells
@@ -217,11 +217,13 @@ def lstm_ctc(features, seq_len):
     # Time major
     logits = tf.transpose(logits, (1, 0, 2))
 
+    print("shape after lstm: {}".format(logits.shape))
+
     return logits
 
 def ctc_loss(targets, logits, seq_len):
     loss = tf.nn.ctc_loss(targets, logits, seq_len, time_major=True, ignore_longer_outputs_than_inputs=True)
-    cost = tf.reduce_mean(loss)
+    cost = tf.reduce_mean(loss) / 200.
     ctc_sum = tf.summary.scalar('ctc_loss', cost)
     return cost, ctc_sum
 
