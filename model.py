@@ -105,10 +105,21 @@ def model(images, valid_affines, seq_len, mask, weight_decay=1e-5, is_training=T
                     # g[i] = slim.conv2d(slim.conv2d(h[i], num_outputs[i], 3), num_outputs[i], 3)
                     g[i] = slim.conv2d(h[i], num_outputs[i], 3)
                 print('Shape of h_{} {}, g_{} {}'.format(i, h[i].shape, i, g[i].shape))
-
+            print('Shape before ROI rotate: {}'.format(g[3].shape))
             text_proposals = roi_rotate(g[3], valid_affines, mask)
+            rotated_image = roi_rotate_test(images, valid_affines, mask)
             print('Shape after ROI rotate: {}'.format(text_proposals.shape))
-            logits = lstm_ctc(text_proposals, seq_len)
+            recon_f = slim.conv2d(text_proposals, 64, 3)
+            recon_f = slim.conv2d(recon_f, 64, 3)
+            recon_f = slim.max_pool2d(recon_f, [2, 1], stride=[2,1]) 
+            recon_f = slim.conv2d(recon_f, 128, 3)
+            recon_f = slim.conv2d(recon_f, 128, 3)
+            recon_f = slim.max_pool2d(recon_f, [2, 1], stride=[2,1]) 
+            recon_f = slim.conv2d(recon_f, 256, 3)
+            recon_f = slim.conv2d(recon_f, 256, 3)
+            recon_f = slim.max_pool2d(recon_f, [2, 1], stride=[2,1]) 
+
+            logits = lstm_ctc(recon_f, seq_len)
 
             # here we use a slightly different way for regression part,
             # we first use a sigmoid to limit the regression range, and also
@@ -119,7 +130,7 @@ def model(images, valid_affines, seq_len, mask, weight_decay=1e-5, is_training=T
             angle_map = (slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) - 0.5) * np.pi/2 # angle is between [-45, 45]
             F_geometry = tf.concat([geo_map, angle_map], axis=-1)
 
-    return F_score, F_geometry, logits, text_proposals
+    return F_score, F_geometry, logits, text_proposals, g[3], rotated_image
 
 
 def focal_loss(prediction_tensor, target_tensor, weights=None, alpha=0.25, gamma=2):
@@ -156,10 +167,14 @@ def dice_coefficient(y_true_cls, y_pred_cls,
     return loss, dice_sum
 
 def roi_rotate(shared_feature, affine, mask):
-    affine = tf.reshape(affine, [-1, 9])[:, :8]
     transformed = tf.contrib.image.transform(shared_feature, affine, interpolation='BILINEAR')
     masked_feature = (transformed * mask)[:, :8, :, :]
     return masked_feature
+
+def roi_rotate_test(image, affine, mask):
+    transformed = tf.contrib.image.transform(tf.image.resize_images(image, size=(640 // 4, 640 // 4)), affine, interpolation='BILINEAR')
+    masked_img = (transformed * mask)[:, :8, :, :]
+    return masked_img
 
 def lstm_cell():
     return tf.contrib.rnn.LSTMCell(FLAGS.hidden_size, state_is_tuple=True)
@@ -181,8 +196,9 @@ def lstm_ctc(features, seq_len):
     #   tf.nn.rnn_cell.RNNCell
     #   tf.nn.rnn_cell.GRUCell
     print('Shape in ctc: {}'.format(features.shape))
-    features = tf.transpose(features, perm=[0, 2, 1, 3])
-    features = tf.reshape(features, (-1, int(features.get_shape()[1]), int(features.get_shape()[2]* features.get_shape()[3])))
+    features = tf.squeeze(features, axis=[1])
+    #features = tf.transpose(features, perm=[0, 2, 1, 3])
+    #features = tf.reshape(features, (-1, int(features.get_shape()[1]), int(features.get_shape()[2]* features.get_shape()[3])))
     print('Shape in ctc: {}'.format(features.shape))
 
     # Stacking rnn cells
@@ -223,7 +239,7 @@ def lstm_ctc(features, seq_len):
 
 def ctc_loss(targets, logits, seq_len):
     loss = tf.nn.ctc_loss(targets, logits, seq_len, time_major=True, ignore_longer_outputs_than_inputs=True)
-    cost = tf.reduce_mean(loss) / 200.
+    cost = tf.reduce_mean(loss)
     ctc_sum = tf.summary.scalar('ctc_loss', cost)
     return cost, ctc_sum
 
@@ -266,6 +282,6 @@ def loss(y_true_cls, y_pred_cls,
     L_theta = 1 - tf.cos(theta_pred - theta_gt)
     aabb_sum = tf.summary.scalar('geometry_AABB', tf.reduce_mean(L_AABB * y_true_cls * training_mask))
     theta_sum = tf.summary.scalar('geometry_theta', tf.reduce_mean(L_theta * y_true_cls * training_mask))
-    L_g = L_AABB + 20 * L_theta
+    L_g = L_AABB + 10 * L_theta
 
     return tf.reduce_mean(L_g * y_true_cls * training_mask) + classification_loss + recon_loss, [aabb_sum, theta_sum, dice_sum, ctc_sum]

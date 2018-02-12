@@ -32,7 +32,7 @@ tf.app.flags.DEFINE_integer('max_image_large_side', 1280,
 tf.app.flags.DEFINE_integer('max_text_size', 1280,
                             'if the text in the input image is bigger than this, then we resize'
                             'the image according to this')
-tf.app.flags.DEFINE_integer('min_text_size', 1,
+tf.app.flags.DEFINE_integer('min_text_size', 10,
                             'if the text size is smaller than this, we ignore it during training')
 tf.app.flags.DEFINE_float('min_crop_side_ratio', 0.1,
                           'when doing random crop from input image, the'
@@ -72,8 +72,13 @@ def load_annoataion(p):
     if not os.path.exists(p):
         return np.array(text_polys, dtype=np.float32)
     with open(p, 'r') as f:
-        reader = csv.reader(f)
-        for line in reader:
+        content = f.readlines()
+        #content = [item for item in content]
+        #reader = csv.reader()
+        for line in content:
+            line = line.split(',')
+            if len(line) != 9:
+                continue
             try:
                 label = line[-1]
             except Exception as e:
@@ -81,14 +86,24 @@ def load_annoataion(p):
                 print line
                 continue
             # strip BOM. \ufeff for python3,  \xef\xbb\bf for python2
-            line = [i.strip('\ufeff').strip('\xef\xbb\xbf').strip('\r\n') for i in line]
+            line = [i.strip('\ufeff').strip('\xef\xbb\xbf').strip('\r\n').strip('\n') for i in line]
 
             x1, y1, x2, y2, x3, y3, x4, y4 = list(map(float, line[:8]))
+            if None in list(map(float, line[:8])):
+                print(p)
+                print(line)
+                continue
             encoded, length = encode_str(line[8])
+            #print(line)
+            try:
+                assert(length < 160)
+            except Exception as e:
+                print(p)
+                print(line)
             text_labels.append(encoded)
             text_polys.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
             text_lengths.append(FLAGS.input_size // 4)
-            if label == '*' or label == '###':
+            if line[8] == '*' or line[8] == '###':
                 text_tags.append(True)
             else:
                 text_tags.append(False)
@@ -382,6 +397,25 @@ def rectangle_from_parallelogram(poly):
             new_p2 = line_cross_point(p1p2, p1p2_verticle)
             return np.array([new_p0, p1, new_p2, p3], dtype=np.float32)
 
+
+def cv2_affine(poly, angle):
+    affine = np.zeros((3,3))
+    ht = 8
+    t = 0
+    b = point_dist_to_line(poly[2], poly[3], poly[0]) / 4.
+    l = 0
+    r = point_dist_to_line(poly[1], poly[2], poly[0]) / 4.
+    s = ht/(t+b)
+    wt = s * (l + r)
+    pts1 = np.float32([[0,0], [wt,0], [0, 8]])
+    pts2 = np.float32([[poly[0, 0] / 4., poly[0, 1] /4.], [poly[1,0]/4., poly[1,1]/4.], [poly[3, 0]/4., poly[3, 1]/4.]])
+    M = cv2.getAffineTransform(pts2,pts1)
+    affine[:2,:] = M
+    affine[2,2] = 1
+    return affine, wt
+
+
+
 def compute_affine(poly, angle):
     ht = 8
     t = 0
@@ -416,7 +450,7 @@ def sort_rectangle(poly):
         p3_index = (p0_index + 3) % 4
         res_poly = poly[[p0_index, p1_index, p2_index, p3_index]]
         angle = 0.
-        aff, wt = compute_affine(res_poly, angle)
+        aff, wt = cv2_affine(res_poly, angle)
         return res_poly, 0., aff, wt
     else:
         # 找到最低点右边的点
@@ -434,7 +468,7 @@ def sort_rectangle(poly):
             p3_index = (p2_index + 1) % 4
             res_poly = poly[[p0_index, p1_index, p2_index, p3_index]]
             angle = -(np.pi/2 - angle)
-            aff, wt = compute_affine(res_poly, angle)
+            aff, wt = cv2_affine(res_poly, angle)
             return res_poly, angle, aff, wt
         else:
             # 这个点为p3
@@ -443,7 +477,7 @@ def sort_rectangle(poly):
             p1_index = (p3_index + 2) % 4
             p2_index = (p3_index + 3) % 4
             res_poly = poly[[p0_index, p1_index, p2_index, p3_index]]
-            aff, wt = compute_affine(res_poly, angle)
+            aff, wt = cv2_affine(res_poly, angle)
             return res_poly, angle, aff, wt
 
 
@@ -740,6 +774,8 @@ def generator(input_size=512, batch_size=32,
                 # valid_bbox = text_polys[np.invert(text_tags)]
                 valid_label = list(compress(text_labels, np.invert(text_tags)))
                 valid_length = text_lengths[np.invert(text_tags)]
+                if True in text_tags:
+                    assert(len(valid_length) != len(text_lengths))
                 valid_affine = affs[np.invert(text_tags)]
                 valid_masks = valid_masks[np.invert(text_tags)]
                 i = random.choice(range(len(valid_label)))
@@ -758,9 +794,10 @@ def generator(input_size=512, batch_size=32,
                 geo_maps.append(geo_map[::4, ::4, :].astype(np.float32))
                 training_masks.append(training_mask[::4, ::4, np.newaxis].astype(np.float32))
                 # valid_bboxes.append(valid_bbox)
+                #print(len(valid_label))
                 valid_labels.append(valid_label)
                 valid_lengths.append(valid_length)
-                valid_affines.append(valid_affine)
+                valid_affines.append(valid_affine.flatten()[:8])
                 text_masks.append(valid_masks[:, :, np.newaxis].astype(np.float32))
                 # valid_thetas.append(valid_theta)
 

@@ -12,7 +12,7 @@ tf.app.flags.DEFINE_float('moving_average_decay', 0.997, '')
 tf.app.flags.DEFINE_string('gpu_list', '0', '')
 tf.app.flags.DEFINE_string('checkpoint_path', './east_resnet_v1_50_rbox/', '')
 tf.app.flags.DEFINE_boolean('restore', False, 'whether to resotre from checkpoint')
-tf.app.flags.DEFINE_integer('save_checkpoint_steps', 400, '')
+tf.app.flags.DEFINE_integer('save_checkpoint_steps', 2000, '')
 tf.app.flags.DEFINE_integer('save_summary_steps', 100, '')
 tf.app.flags.DEFINE_string('pretrained_model_path', None, '')
 
@@ -27,26 +27,29 @@ print "checkpoint path {}".format(FLAGS.checkpoint_path)
 def tower_loss(images, score_maps, geo_maps, training_masks, valid_affines, seq_len, mask, targets, reuse_variables=None, is_training=True):
     # Build inference graph
     with tf.variable_scope(tf.get_variable_scope(), reuse=reuse_variables):
-        f_score, f_geometry, logits, text_proposals = model.model(images, valid_affines, seq_len, mask, is_training=is_training)
+        f_score, f_geometry, logits, text_proposals, before_rotate, image_proposal = model.model(images, valid_affines, seq_len, mask, is_training=is_training)
 
     model_loss, loss_sum_list = model.loss(score_maps, f_score, geo_maps, f_geometry, training_masks, targets, logits, seq_len)
     total_loss = tf.add_n([model_loss] + tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
 
     # add summary
     if reuse_variables is None:
-        input_sum = tf.summary.image('input', images)
+        input_sum = tf.summary.image('input/input', images)
         score_map_sum = tf.summary.image('score_map', score_maps)
         score_map_pred_sum = tf.summary.image('score_map_pred', f_score * 255)
         geo_map_sum = tf.summary.image('geo_map_0', geo_maps[:, :, :, 0:1])
         geo_map_pred_sum = tf.summary.image('geo_map_0_pred', f_geometry[:, :, :, 0:1])
         detection_mask_sum = tf.summary.image('training_masks', training_masks)
-        recongnition_mask_sum = tf.summary.image('feature_mask', mask)
+        recongnition_mask_sum = tf.summary.image('input/feature_mask', mask)
         model_loss_sum = tf.summary.scalar('model_loss', model_loss)
         total_loss_sum = tf.summary.scalar('total_loss', total_loss)
         model_val_sum = tf.summary.scalar('model_val_loss', model_loss)
         total_val_sum = tf.summary.scalar('total_val_loss', total_loss)
+        rotate_feature_sum = tf.summary.image('input/rotated_feature', text_proposals[:, :, :, 0:1])
+        rotate_image_sum = tf.summary.image('input/rotated_image', image_proposal)
+        before_rotate_feature_sum = tf.summary.image('input/rotated_feature_original', before_rotate[:, :, :, 0:1])
 
-    return total_loss, model_loss, [model_loss_sum, total_loss_sum, input_sum, score_map_sum, score_map_pred_sum, geo_map_sum, geo_map_pred_sum, detection_mask_sum, recongnition_mask_sum] + loss_sum_list, [model_val_sum, total_val_sum]
+    return total_loss, model_loss, [model_loss_sum, total_loss_sum, input_sum, score_map_sum, score_map_pred_sum, geo_map_sum, geo_map_pred_sum, detection_mask_sum, recongnition_mask_sum, rotate_feature_sum, before_rotate_feature_sum, rotate_image_sum] + loss_sum_list, [model_val_sum, total_val_sum]
 
 
 def average_gradients(tower_grads):
@@ -89,7 +92,7 @@ def main(argv=None):
 
     # 1d array of size [batch_size]
     seq_len = tf.placeholder(tf.int32, [None])
-    valid_affines = tf.placeholder(tf.float32, shape=[None, 3, 3])
+    valid_affines = tf.placeholder(tf.float32, shape=[None, 8])
     text_masks = tf.placeholder(tf.float32, shape=[None, None, None, 1], name='text_masks')
 
     # model_val_loss = tf.placeholder(tf.float32, shape=[], name='model_val_loss')
@@ -146,7 +149,7 @@ def main(argv=None):
     with tf.control_dependencies([variables_averages_op, apply_gradient_op, batch_norm_updates_op]):
         train_op = tf.no_op(name='train_op')
 
-    saver = tf.train.Saver(tf.global_variables(), max_to_keep=None)
+    saver = tf.train.Saver(tf.global_variables(), max_to_keep=2)
     summary_writer = tf.summary.FileWriter(FLAGS.checkpoint_path, tf.get_default_graph())
 
     init = tf.global_variables_initializer()
@@ -154,7 +157,7 @@ def main(argv=None):
     if FLAGS.pretrained_model_path is not None:
         variable_restore_op = slim.assign_from_checkpoint_fn(FLAGS.pretrained_model_path, tf.get_collection(tf.GraphKeys.MODEL_VARIABLES),
                                                              ignore_missing_vars=True)
-    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.8)
+    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=1.0)
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)) as sess:
         if FLAGS.restore:
             print('continue training from previous checkpoint')
@@ -174,7 +177,7 @@ def main(argv=None):
                                          val=True)
 
         start = time.time()
-        for step in range(FLAGS.max_steps):
+        for step in range(1, FLAGS.max_steps):
             data = next(data_generator)
             ml, tl, _, summary_str = sess.run([model_loss, total_loss, train_op, tr_summary_op], feed_dict={input_images: data[0],
                                                                                 input_score_maps: data[2],

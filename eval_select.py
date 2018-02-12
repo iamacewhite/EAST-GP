@@ -19,6 +19,7 @@ tf.app.flags.DEFINE_bool('log_only', False, 'log only')
 
 import model
 from icdar import restore_rectangle
+from tensorflow.python.tools import inspect_checkpoint as chkp
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -155,12 +156,28 @@ def main(argv=None):
 
     with tf.get_default_graph().as_default():
         input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
+        valid_affines = tf.placeholder(tf.float32, shape=[None, 8])
+        seq_len = tf.placeholder(tf.int32, shape=[None])
+        text_masks = tf.placeholder(tf.float32, shape=[None, None, None, 1])
         global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
 
-        f_score, f_geometry = model.model(input_images, is_training=False)
+        f_score, f_geometry, _, _, _, _ = model.model(input_images, valid_affines, seq_len, text_masks,is_training=False)
 
         variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
-        saver = tf.train.Saver(variable_averages.variables_to_restore())
+        #saver = tf.train.Saver(variable_averages.variables_to_restore())
+        variables = tf.global_variables()
+
+
+        modified_vars = {}
+        for i, val in enumerate(variables):
+            if val.op.name == "feature_fusion/W":
+                modified_vars["model_0/feature_fusion/W"] = tf.Variable(tf.truncated_normal([128, 96], stddev=0.1), name="W")
+            elif val.op.name == "feature_fusion/b":
+                modified_vars["model_0/feature_fusion/b"] = tf.Variable(tf.constant(0., shape=[96]), name="b")
+            else:
+                modified_vars[val.op.name] = val
+        print(modified_vars)
+        saver = tf.train.Saver(modified_vars)
         config = tf.ConfigProto(allow_soft_placement=True)
         config.gpu_options.allow_growth = True
         config.gpu_options.per_process_gpu_memory_fraction = 0.8
@@ -168,8 +185,8 @@ def main(argv=None):
             checkpoints = os.listdir(FLAGS.checkpoint_path)
             checkpoints = [ckpt for ckpt in checkpoints if "ckpt" in ckpt and "index" in ckpt]
             checkpoints = [ckpt.replace('.index', '') for ckpt in checkpoints if ckpt.replace('.index', '') not in existing_log]
-            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[1]), reverse=True)
-            for m_path in checkpoints:
+            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[1]), reverse=True)[0]
+            for m_path in [checkpoints]:
                 ckpt_state = tf.train.get_checkpoint_state(FLAGS.checkpoint_path)
                 model_path = os.path.join(FLAGS.checkpoint_path, m_path)
                 print('Restore from {}'.format(model_path))
